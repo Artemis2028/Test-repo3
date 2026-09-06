@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Meridian</string>
+    <string name="nav_position">Position</string>
+    <string name="nav_navigate">Navigate</string>
+    <string name="nav_map">Map</string>
+    <string name="nav_waypoints">Waypoints</string>
+    <string name="nav_tools">Tools</string>
+    <string name="disclaimer">A phone GPS is an aid. Carry a map and a compass.</string>
+</resources>
