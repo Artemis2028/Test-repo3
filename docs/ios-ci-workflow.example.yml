@@ -1,0 +1,46 @@
+# EXAMPLE ONLY — do not copy into .github/workflows until a token with
+# `workflow` scope can push workflow files. Intended for macos-latest later.
+#
+# Suggested path once enabled: .github/workflows/ios.yml
+name: iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+
+jobs:
+  spm-test:
+    name: GridFixCore (swift test)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+      - name: swift test
+        run: swift test
+
+  # Uncomment after `xcodegen generate` is committed or run in CI:
+  # xcodebuild:
+  #   name: GridFixApp (simulator)
+  #   runs-on: macos-latest
+  #   defaults:
+  #     run:
+  #       working-directory: ios
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: brew install xcodegen && xcodegen generate
+  #     - run: |
+  #         xcodebuild \
+  #           -project GridFixApp.xcodeproj \
+  #           -scheme GridFixApp \
+  #           -destination 'platform=iOS Simulator,name=iPhone 16' \
+  #           -quiet build

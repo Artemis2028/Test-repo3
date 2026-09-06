@@ -1,0 +1,10 @@
+.DS_Store
+.swiftpm/
+.build/
+DerivedData/
+*.xcodeproj/
+!GridFixApp.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+.idea/

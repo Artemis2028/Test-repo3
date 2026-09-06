@@ -1,4 +1,4 @@
-> **Staging repo for the iOS port.** This tree is a copy of [`Artemis2028/gridfix`](https://github.com/Artemis2028/gridfix) (Android tip) into `Test-repo3`. Keep `gridfix` as the Android product/testing line; evolve shared/portable code and the iOS app here.
+> **Staging repo for the iOS port.** This tree is a copy of [`Artemis2028/gridfix`](https://github.com/Artemis2028/gridfix) (Android tip) into `Test-repo3`. Keep `gridfix` as the Android product/testing line; evolve shared/portable code and the iOS app here. **iOS scaffold:** see [`ios/`](ios/) (Swift Package `GridFixCore` + SwiftUI shell) and [`docs/ios-port-staging.md`](docs/ios-port-staging.md).
 
 # MGRS GPS
 
@@ -60,6 +60,18 @@ angle wrap, folder naming, twilight ordering:
 ```
 ./gradlew testDebugUnitTest
 ```
+
+## iOS (scaffold)
+
+The `ios/` directory is a Swift Package (`GridFixCore`) plus a SwiftUI app shell.
+It does not affect the Android Gradle build. On a Mac:
+
+```
+cd ios && swift test
+# optional UI: brew install xcodegen && xcodegen generate && open GridFixApp.xcodeproj
+```
+
+Details: [ios/README.md](ios/README.md).
 
 ## How releases are made
 

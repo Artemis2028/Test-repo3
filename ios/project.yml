@@ -1,0 +1,35 @@
+# XcodeGen spec — run on a Mac: `brew install xcodegen && xcodegen generate`
+# Opens as GridFixApp.xcodeproj and links the local Swift package (GridFixCore).
+name: GridFixApp
+options:
+  bundleIdPrefix: app.gridfix
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  BASE_SDK: iphoneos
+  SWIFT_VERSION: "5.9"
+  TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  GridFix:
+    path: .
+targets:
+  GridFixApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: GridFixApp
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: app.gridfix.ios
+      PRODUCT_NAME: MGRS GPS
+      INFOPLIST_KEY_CFBundleDisplayName: MGRS GPS
+      INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+      INFOPLIST_KEY_UILaunchScreen_Generation: YES
+      INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+      GENERATE_INFOPLIST_FILE: YES
+      MARKETING_VERSION: "0.1.0"
+      CURRENT_PROJECT_VERSION: 1
+    dependencies:
+      - package: GridFix
+        product: GridFixCore
