@@ -16,3 +16,6 @@ gen/
 out/
 .kotlin/
 app/build/
+
+!dist/
+!dist/**
