@@ -1,0 +1,822 @@
+package app.gridfix.android.map
+
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Point
+import android.graphics.RectF
+import android.graphics.Typeface
+import app.gridfix.android.data.GeoVertex
+import app.gridfix.android.data.GraphicTypes
+import app.gridfix.android.data.TacGraphic
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.Projection
+import org.osmdroid.views.overlay.Overlay
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+/**
+ * Draws tactical control-measure graphics: phase lines, boundaries, axes of advance,
+ * directions of attack, objectives, assembly areas, and routes — in doctrine-style
+ * presentation (MIL-STD-2525 / APP-6 line graphics, simplified for a phone screen).
+ *
+ * The overlay renders whatever is in [graphics] (already filtered to visible folders
+ * by the caller) plus an in-progress [draftPoints] polyline while draw mode is active.
+ * Colors follow the waypoint affiliation palette; night mode forces the red-on-black
+ * scheme like the rest of the app.
+ */
+class ControlMeasuresOverlay(private val density: Float) : Overlay() {
+
+    var graphics: List<TacGraphic> = emptyList()
+    var selectedId: String? = null
+    var nightMode = false
+    var lightLines = false
+
+    // In-progress drawing (draw mode)
+    var draftActive = false
+    var draftType: String = "phase_line"
+    var draftAffiliation: String = "none"
+    var draftPoints: List<GeoVertex> = emptyList()
+
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2.6f * density
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6.5f * density
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val textFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+    }
+    private val textHalo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        style = Paint.Style.STROKE
+        strokeWidth = 3f * density
+    }
+    private val dash = DashPathEffect(floatArrayOf(9f * density, 6f * density), 0f)
+
+    private val gp = GeoPoint(0.0, 0.0)
+    private val pt = Point()
+    private val path = Path()
+    private val xs = FloatArray(MAX_PTS)
+    private val ys = FloatArray(MAX_PTS)
+
+    override fun draw(canvas: Canvas, projection: Projection) {
+        val haloColor = if (nightMode || lightLines) Color.BLACK else Color.WHITE
+        for (g in graphics) {
+            val n = project(projection, g.points)
+            if (n == 0) continue
+            drawGraphic(
+                canvas, g.type, colorFor(g.affiliation), haloColor, n,
+                nightName(g.name, g.affiliation), g.id == selectedId, dashed = false,
+                radiusM = ringRadiusM(g.type, g.points),
+                echelon = g.echelon,
+            )
+        }
+        if (draftActive && draftPoints.isNotEmpty()) {
+            val n = project(projection, draftPoints)
+            drawGraphic(
+                canvas, draftType, colorFor(draftAffiliation), haloColor, n, "",
+                selected = false, dashed = true,
+                radiusM = ringRadiusM(draftType, draftPoints),
+            )
+            // vertex handles so each placed point is visible while drawing
+            handlePaint.color = haloColor
+            for (i in 0 until n) {
+                canvas.drawCircle(xs[i], ys[i], 4.5f * density, handlePaint)
+            }
+            handlePaint.color = colorFor(draftAffiliation)
+            for (i in 0 until n) {
+                canvas.drawCircle(xs[i], ys[i], 3f * density, handlePaint)
+            }
+        }
+    }
+
+    /** Screen-space distance from (x,y) to the nearest segment of [g], in pixels. */
+    fun distanceToGraphic(projection: Projection, g: TacGraphic, x: Float, y: Float): Float {
+        val n = project(projection, g.points)
+        if (n == 0) return Float.MAX_VALUE
+        if (n == 1) return hypot(x - xs[0], y - ys[0])
+        if (g.type == "ring" && n >= 2) {
+            val r = hypot(xs[1] - xs[0], ys[1] - ys[0])
+            val d = hypot(x - xs[0], y - ys[0])
+            return min(abs(d - r), d)
+        }
+        if (g.type == "sector" && n >= 3) {
+            return min(
+                segmentDistance(x, y, xs[0], ys[0], xs[1], ys[1]),
+                segmentDistance(x, y, xs[0], ys[0], xs[2], ys[2]),
+            )
+        }
+        var best = Float.MAX_VALUE
+        val closed = GraphicTypes.isArea(g.type) && n >= 3
+        val last = if (closed) n else n - 1
+        for (i in 0 until last) {
+            val j = (i + 1) % n
+            best = min(best, segmentDistance(x, y, xs[i], ys[i], xs[j], ys[j]))
+        }
+        return best
+    }
+
+    /** Geodesic radius in metres for a range ring (center + edge point), else -1. */
+    private fun ringRadiusM(type: String, points: List<GeoVertex>): Double {
+        if (type != "ring" || points.size < 2) return -1.0
+        return haversineM(points[0], points[1])
+    }
+
+    private fun haversineM(a: GeoVertex, b: GeoVertex): Double {
+        val r = 6371008.8
+        val dLat = Math.toRadians(b.lat - a.lat)
+        val dLon = Math.toRadians(b.lon - a.lon)
+        val h = sin(dLat / 2) * sin(dLat / 2) +
+            cos(Math.toRadians(a.lat)) * cos(Math.toRadians(b.lat)) *
+            sin(dLon / 2) * sin(dLon / 2)
+        return 2 * r * atan2(sqrt(h), sqrt(1 - h))
+    }
+
+    /**
+     * On a single-color (night) display, enemy graphics are marked "ENY" per
+     * FM 1-02.2 / MIL-STD-2525 practice, since color no longer distinguishes them.
+     */
+    private fun nightName(name: String, affiliation: String): String =
+        if (nightMode && affiliation == "hostile") "$name ENY" else name
+
+    private fun colorFor(affiliation: String): Int {
+        if (nightMode) {
+            // Two-tone red: hostile stays at full intensity, everything else dimmer
+            return if (affiliation == "hostile") Color.rgb(255, 59, 48) else Color.rgb(196, 45, 36)
+        }
+        return when (affiliation) {
+            "friendly" -> Color.rgb(45, 120, 200)
+            "hostile" -> Color.rgb(210, 50, 40)
+            "neutral" -> Color.rgb(60, 150, 60)
+            "unknown" -> Color.rgb(200, 170, 40)
+            else -> if (lightLines) Color.WHITE else Color.rgb(20, 22, 26)
+        }
+    }
+
+    private fun project(projection: Projection, points: List<GeoVertex>, ): Int {
+        val n = min(points.size, MAX_PTS)
+        for (i in 0 until n) {
+            gp.setCoords(points[i].lat, points[i].lon)
+            projection.toPixels(gp, pt)
+            xs[i] = pt.x.toFloat()
+            ys[i] = pt.y.toFloat()
+        }
+        return n
+    }
+
+    private fun drawGraphic(
+        canvas: Canvas,
+        type: String,
+        color: Int,
+        haloColor: Int,
+        n: Int,
+        name: String,
+        selected: Boolean,
+        dashed: Boolean,
+        radiusM: Double = -1.0,
+        echelon: String = "",
+    ) {
+        linePaint.color = color
+        linePaint.alpha = 235
+        linePaint.pathEffect = if (dashed) dash else null
+        glowPaint.color = haloColor
+        glowPaint.alpha = 120
+
+        when (type) {
+            "axis" -> if (n >= 2) {
+                buildAxisPath(n)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                label(canvas, name, xs[0], ys[0], color, haloColor, above = true)
+            }
+            "doa" -> if (n >= 2) {
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                drawSolidArrowHead(canvas, n, color)
+                label(canvas, name, xs[0], ys[0], color, haloColor, above = true)
+            }
+            "ring" -> if (n >= 2) {
+                val r = hypot(xs[1] - xs[0], ys[1] - ys[0])
+                if (selected) canvas.drawCircle(xs[0], ys[0], r, glowPaint)
+                canvas.drawCircle(xs[0], ys[0], r, linePaint)
+                // small center cross so the ring stays readable when zoomed out
+                val c = 5f * density
+                canvas.drawLine(xs[0] - c, ys[0], xs[0] + c, ys[0], linePaint)
+                canvas.drawLine(xs[0], ys[0] - c, xs[0], ys[0] + c, linePaint)
+                val rangeText = if (radiusM < 0) "" else formatRange(radiusM)
+                val text = listOf(name, rangeText).filter { it.isNotBlank() }.joinToString(" · ")
+                label(canvas, text, xs[0], ys[0] - r - 3f * density, color, haloColor, above = true, centered = true)
+            }
+            "sector" -> if (n >= 3) {
+                val r = max(
+                    hypot(xs[1] - xs[0], ys[1] - ys[0]),
+                    hypot(xs[2] - xs[0], ys[2] - ys[0]),
+                )
+                val aL = Math.toDegrees(atan2((ys[1] - ys[0]).toDouble(), (xs[1] - xs[0]).toDouble())).toFloat()
+                val aR = Math.toDegrees(atan2((ys[2] - ys[0]).toDouble(), (xs[2] - xs[0]).toDouble())).toFloat()
+                var sweep = aR - aL
+                while (sweep <= 0f) sweep += 360f
+                while (sweep > 360f) sweep -= 360f
+                val oval = RectF(xs[0] - r, ys[0] - r, xs[0] + r, ys[0] + r)
+                path.reset()
+                path.moveTo(xs[0], ys[0])
+                path.arcTo(oval, aL, sweep)
+                path.close()
+                fillPaint.color = color
+                fillPaint.alpha = 22
+                canvas.drawPath(path, fillPaint)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                // label along the sector bisector, half way out
+                val mid = Math.toRadians((aL + sweep / 2f).toDouble())
+                label(
+                    canvas, name,
+                    xs[0] + (r * 0.55f) * cos(mid).toFloat(),
+                    ys[0] + (r * 0.55f) * sin(mid).toFloat(),
+                    color, haloColor, above = false, centered = true,
+                )
+            }
+            "trp" -> {
+                // Target reference point: doctrinal cross with the TRP number
+                val arm = 9f * density
+                if (selected) {
+                    canvas.drawLine(xs[0] - arm, ys[0], xs[0] + arm, ys[0], glowPaint)
+                    canvas.drawLine(xs[0], ys[0] - arm, xs[0], ys[0] + arm, glowPaint)
+                }
+                canvas.drawLine(xs[0] - arm, ys[0], xs[0] + arm, ys[0], linePaint)
+                canvas.drawLine(xs[0], ys[0] - arm, xs[0], ys[0] + arm, linePaint)
+                handlePaint.color = color
+                canvas.drawCircle(xs[0], ys[0], 2.2f * density, handlePaint)
+                label(canvas, GraphicTypes.labelPrefix(type) + name.uppercase(Locale.US), xs[0] + arm, ys[0] - 4f * density, color, haloColor, above = true)
+            }
+            "checkpoint" -> {
+                // Doctrinal checkpoint pennant: inverted teardrop, tip on the spot
+                val r = 7f * density
+                val cyTop = ys[0] - r * 2.4f
+                val a1 = Math.toRadians(140.0)
+                path.reset()
+                path.moveTo(xs[0], ys[0])
+                path.lineTo(xs[0] + r * cos(a1).toFloat(), cyTop + r * sin(a1).toFloat())
+                path.arcTo(xs[0] - r, cyTop - r, xs[0] + r, cyTop + r, 140f, 260f, false)
+                path.close()
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                handlePaint.color = color
+                canvas.drawCircle(xs[0], ys[0], 2f * density, handlePaint)
+                label(canvas, GraphicTypes.labelPrefix(type) + name.uppercase(Locale.US), xs[0] + r * 1.3f, cyTop, color, haloColor, above = true)
+            }
+            "text" -> {
+                val size = 13.5f * density
+                textFill.textSize = size
+                textHalo.textSize = size
+                textFill.color = color
+                textFill.alpha = 245
+                textHalo.color = haloColor
+                textHalo.alpha = 200
+                val tw = textFill.measureText(name)
+                if (selected) {
+                    fillPaint.color = haloColor
+                    fillPaint.alpha = 90
+                    canvas.drawRect(
+                        xs[0] - tw / 2f - 3f * density, ys[0] - size,
+                        xs[0] + tw / 2f + 3f * density, ys[0] + size * 0.45f,
+                        fillPaint,
+                    )
+                }
+                canvas.drawText(name, xs[0] - tw / 2f, ys[0] + size / 3f, textHalo)
+                canvas.drawText(name, xs[0] - tw / 2f, ys[0] + size / 3f, textFill)
+            }
+            "flot" -> if (n >= 2) {
+                // Forward line of own troops: back-to-back scallops bulging to
+                // the LEFT of the drawing direction (face them at the enemy).
+                val r = 5.5f * density
+                if (selected) {
+                    buildPolyline(n, closed = false)
+                    canvas.drawPath(path, glowPaint)
+                }
+                val pe = linePaint.pathEffect
+                linePaint.pathEffect = null
+                walkSegments(n, 2f * r) { x, y, ang ->
+                    val deg = Math.toDegrees(ang).toFloat()
+                    canvas.drawArc(
+                        x - r, y - r, x + r, y + r,
+                        deg + 180f, 180f, false, linePaint,
+                    )
+                }
+                linePaint.pathEffect = pe
+                val text = "FLOT" + if (name.isBlank()) "" else " $name"
+                label(canvas, text, xs[0], ys[0], color, haloColor, above = true)
+                label(canvas, text, xs[n - 1], ys[n - 1], color, haloColor, above = true)
+            }
+            "obstacle_line" -> if (n >= 2) {
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                // teeth on the left side of the drawing direction
+                val tooth = 6f * density
+                walkSegments(n, 12f * density) { x, y, ang ->
+                    val nx = sin(ang).toFloat()
+                    val ny = -cos(ang).toFloat()
+                    path.reset()
+                    path.moveTo(x - tooth * 0.55f * cos(ang).toFloat(), y - tooth * 0.55f * sin(ang).toFloat())
+                    path.lineTo(x + nx * tooth, y + ny * tooth)
+                    path.lineTo(x + tooth * 0.55f * cos(ang).toFloat(), y + tooth * 0.55f * sin(ang).toFloat())
+                    path.close()
+                    fillPaint.color = color
+                    fillPaint.alpha = 235
+                    canvas.drawPath(path, fillPaint)
+                }
+                label(canvas, name, xs[0], ys[0], color, haloColor, above = true)
+            }
+            "wire" -> if (n >= 2) {
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                val arm = 4.5f * density
+                walkSegments(n, 13f * density) { x, y, ang ->
+                    val a1 = ang + Math.PI / 4
+                    val a2 = ang - Math.PI / 4
+                    canvas.drawLine(
+                        x - arm * cos(a1).toFloat(), y - arm * sin(a1).toFloat(),
+                        x + arm * cos(a1).toFloat(), y + arm * sin(a1).toFloat(), linePaint,
+                    )
+                    canvas.drawLine(
+                        x - arm * cos(a2).toFloat(), y - arm * sin(a2).toFloat(),
+                        x + arm * cos(a2).toFloat(), y + arm * sin(a2).toFloat(), linePaint,
+                    )
+                }
+                label(canvas, name, xs[0], ys[0], color, haloColor, above = true)
+            }
+            "lane" -> if (n >= 2) {
+                // Cleared lane: two parallel edges either side of the centerline
+                val half = 4.5f * density
+                for (side in intArrayOf(-1, 1)) {
+                    path.reset()
+                    for (i in 0 until n) {
+                        val (nxv, nyv) = miterNormal(xs, ys, n, i)
+                        val px = xs[i] + nxv * half * side
+                        val py = ys[i] + nyv * half * side
+                        if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+                    }
+                    if (selected) canvas.drawPath(path, glowPaint)
+                    canvas.drawPath(path, linePaint)
+                }
+                label(canvas, name, xs[n / 2], ys[n / 2], color, haloColor, above = true)
+            }
+            "roadblock" -> {
+                // Six-armed block mark across the route
+                val arm = 8f * density
+                if (selected) canvas.drawCircle(xs[0], ys[0], arm, glowPaint)
+                for (k in 0 until 3) {
+                    val ang = Math.toRadians(k * 60.0)
+                    canvas.drawLine(
+                        xs[0] - arm * cos(ang).toFloat(), ys[0] - arm * sin(ang).toFloat(),
+                        xs[0] + arm * cos(ang).toFloat(), ys[0] + arm * sin(ang).toFloat(),
+                        linePaint,
+                    )
+                }
+                label(canvas, name, xs[0] + arm, ys[0] - arm * 0.5f, color, haloColor, above = true)
+            }
+            "minefield" -> if (n >= 2) {
+                buildPolyline(n, closed = n >= 3)
+                fillPaint.color = color
+                fillPaint.alpha = 20
+                if (n >= 3) canvas.drawPath(path, fillPaint)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                var cx = 0f
+                var cy = 0f
+                for (i in 0 until n) {
+                    cx += xs[i]; cy += ys[i]
+                }
+                cx /= n; cy /= n
+                // mine circles: small - large - small
+                val pe = linePaint.pathEffect
+                linePaint.pathEffect = null
+                canvas.drawCircle(cx - 11f * density, cy, 2.8f * density, linePaint)
+                canvas.drawCircle(cx, cy, 4.2f * density, linePaint)
+                canvas.drawCircle(cx + 11f * density, cy, 2.8f * density, linePaint)
+                linePaint.pathEffect = pe
+                label(canvas, name.uppercase(Locale.US), cx, cy + 16f * density, color, haloColor, above = false, centered = true)
+            }
+            "strongpoint" -> if (n >= 2) {
+                buildPolyline(n, closed = n >= 3)
+                fillPaint.color = color
+                fillPaint.alpha = 26
+                if (n >= 3) canvas.drawPath(path, fillPaint)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                // outward teeth around the perimeter, pointing away from the centroid
+                var cx = 0f
+                var cy = 0f
+                for (i in 0 until n) {
+                    cx += xs[i]; cy += ys[i]
+                }
+                cx /= n; cy /= n
+                val tooth = 6f * density
+                walkSegments(n, 14f * density, closed = n >= 3) { x, y, ang ->
+                    var nx = sin(ang).toFloat()
+                    var ny = -cos(ang).toFloat()
+                    // flip toward the outside
+                    if ((x + nx - cx) * (x + nx - cx) + (y + ny - cy) * (y + ny - cy) <
+                        (x - nx - cx) * (x - nx - cx) + (y - ny - cy) * (y - ny - cy)
+                    ) {
+                        nx = -nx; ny = -ny
+                    }
+                    path.reset()
+                    path.moveTo(x - tooth * 0.5f * cos(ang).toFloat(), y - tooth * 0.5f * sin(ang).toFloat())
+                    path.lineTo(x + nx * tooth, y + ny * tooth)
+                    path.lineTo(x + tooth * 0.5f * cos(ang).toFloat(), y + tooth * 0.5f * sin(ang).toFloat())
+                    path.close()
+                    fillPaint.color = color
+                    fillPaint.alpha = 235
+                    canvas.drawPath(path, fillPaint)
+                }
+                label(canvas, name.uppercase(Locale.US), cx, cy, color, haloColor, above = false, centered = true)
+            }
+            "boundary" -> if (n >= 2) {
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                val mid = n / 2
+                if (echelon.isNotEmpty()) {
+                    drawEchelonMark(canvas, xs[mid], ys[mid], echelon, color, haloColor)
+                }
+                label(canvas, name.uppercase(Locale.US), xs[mid], ys[mid], color, haloColor, above = true)
+            }
+            "screen_l", "guard_l", "cover_l" -> if (n >= 2) {
+                // Security missions drawn doctrinally: the line, arrows pointing
+                // OUTWARD from both ends, boxed letter (S/G/C) at the midpoint.
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                solidHeadAt(canvas, xs[0], ys[0], atan2((ys[0] - ys[1]).toDouble(), (xs[0] - xs[1]).toDouble()), color)
+                solidHeadAt(canvas, xs[n - 1], ys[n - 1], atan2((ys[n - 1] - ys[n - 2]).toDouble(), (xs[n - 1] - xs[n - 2]).toDouble()), color)
+                val letter = GraphicTypes.securityLetter(type) ?: ""
+                val bx = xs[n / 2]
+                val by = ys[n / 2]
+                val half = 8f * density
+                fillPaint.color = haloColor
+                fillPaint.alpha = 220
+                canvas.drawRect(bx - half, by - half, bx + half, by + half, fillPaint)
+                val pe = linePaint.pathEffect
+                linePaint.pathEffect = null
+                canvas.drawRect(bx - half, by - half, bx + half, by + half, linePaint)
+                linePaint.pathEffect = pe
+                val size = 11f * density
+                textFill.textSize = size
+                textFill.color = color
+                textFill.alpha = 245
+                canvas.drawText(letter, bx - textFill.measureText(letter) / 2f, by + size / 3f, textFill)
+                label(canvas, name, xs[0], ys[0], color, haloColor, above = true)
+            }
+            "dp" -> {
+                // Decision point: five-point star with the DP number beside it
+                val r = 11f * density
+                path.reset()
+                for (i in 0 until 5) {
+                    val ao = Math.toRadians(-90.0 + i * 72.0)
+                    val ai = Math.toRadians(-90.0 + i * 72.0 + 36.0)
+                    val ox = xs[0] + (r * cos(ao)).toFloat()
+                    val oy = ys[0] + (r * sin(ao)).toFloat()
+                    if (i == 0) path.moveTo(ox, oy) else path.lineTo(ox, oy)
+                    path.lineTo(xs[0] + (r * 0.42f * cos(ai)).toFloat(), ys[0] + (r * 0.42f * sin(ai)).toFloat())
+                }
+                path.close()
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                label(canvas, GraphicTypes.labelPrefix(type) + name.uppercase(Locale.US), xs[0] + r, ys[0] - r * 0.6f, color, haloColor, above = true)
+            }
+            "objective", "aa", "lz", "pz", "bp", "ea", "nai", "tai", "area" -> if (n >= 2) {
+                buildPolyline(n, closed = n >= 3)
+                fillPaint.color = color
+                fillPaint.alpha = 26
+                if (n >= 3) canvas.drawPath(path, fillPaint)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                var cx = 0f
+                var cy = 0f
+                for (i in 0 until n) {
+                    cx += xs[i]; cy += ys[i]
+                }
+                label(
+                    canvas,
+                    GraphicTypes.labelPrefix(type) + name.uppercase(Locale.US),
+                    cx / n,
+                    cy / n,
+                    color,
+                    haloColor,
+                    above = false,
+                    centered = true,
+                )
+            }
+            "route" -> if (n >= 2) {
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                handlePaint.color = color
+                for (i in 0 until n) {
+                    canvas.drawCircle(xs[i], ys[i], 3f * density, handlePaint)
+                }
+                // leg numbers at each leg midpoint, matching the route card
+                for (i in 0 until n - 1) {
+                    label(
+                        canvas, "${i + 1}",
+                        (xs[i] + xs[i + 1]) / 2f, (ys[i] + ys[i + 1]) / 2f,
+                        color, haloColor, above = true,
+                    )
+                }
+                label(canvas, name, xs[0], ys[0], color, haloColor, above = true)
+            }
+            else -> if (n >= 2) {          // phase_line, boundary
+                buildPolyline(n, closed = false)
+                if (selected) canvas.drawPath(path, glowPaint)
+                canvas.drawPath(path, linePaint)
+                val text = GraphicTypes.labelPrefix(type) + name.uppercase(Locale.US)
+                if (type == "phase_line") {
+                    label(canvas, text, xs[0], ys[0], color, haloColor, above = true)
+                    label(canvas, text, xs[n - 1], ys[n - 1], color, haloColor, above = true)
+                } else {
+                    val mid = n / 2
+                    label(canvas, text, xs[mid], ys[mid], color, haloColor, above = true)
+                }
+            }
+        }
+    }
+
+    /** Walk the projected polyline emitting a point + segment angle every [spacing] px. */
+    private inline fun walkSegments(
+        n: Int,
+        spacing: Float,
+        closed: Boolean = false,
+        emit: (x: Float, y: Float, angleRad: Double) -> Unit,
+    ) {
+        var carry = spacing / 2f
+        val last = if (closed) n else n - 1
+        for (i in 0 until last) {
+            val j = (i + 1) % n
+            val dx = xs[j] - xs[i]
+            val dy = ys[j] - ys[i]
+            val len = hypot(dx, dy)
+            if (len <= 0f) continue
+            val ang = atan2(dy.toDouble(), dx.toDouble())
+            var d = carry
+            while (d <= len) {
+                emit(xs[i] + dx * d / len, ys[i] + dy * d / len, ang)
+                d += spacing
+            }
+            carry = d - len
+        }
+    }
+
+    /** Echelon size mark drawn ON a boundary line, backed by a halo box. */
+    private fun drawEchelonMark(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        echelon: String,
+        color: Int,
+        haloColor: Int,
+    ) {
+        val s = 4.5f * density
+        fillPaint.color = haloColor
+        fillPaint.alpha = 230
+        canvas.drawRect(x - s * 5.5f, y - s * 1.8f, x + s * 5.5f, y + s * 1.8f, fillPaint)
+        val pe = linePaint.pathEffect
+        linePaint.pathEffect = null
+        handlePaint.color = color
+
+        fun dots(c: Int) {
+            val gap = s * 1.6f
+            val x0 = x - gap * (c - 1) / 2f
+            for (k in 0 until c) canvas.drawCircle(x0 + gap * k, y, s * 0.55f, handlePaint)
+        }
+
+        fun bars(c: Int) {
+            val gap = s * 1.4f
+            val x0 = x - gap * (c - 1) / 2f
+            for (k in 0 until c) canvas.drawLine(x0 + gap * k, y - s, x0 + gap * k, y + s, linePaint)
+        }
+
+        fun exes(c: Int) {
+            val gap = s * 2.6f
+            val x0 = x - gap * (c - 1) / 2f
+            for (k in 0 until c) {
+                val cx = x0 + gap * k
+                canvas.drawLine(cx - s, y - s, cx + s, y + s, linePaint)
+                canvas.drawLine(cx - s, y + s, cx + s, y - s, linePaint)
+            }
+        }
+
+        when (echelon) {
+            "tm" -> {
+                canvas.drawCircle(x, y, s * 0.8f, linePaint)
+                canvas.drawLine(x - s * 1.2f, y + s * 1.2f, x + s * 1.2f, y - s * 1.2f, linePaint)
+            }
+            "sqd" -> dots(1)
+            "sec" -> dots(2)
+            "plt" -> dots(3)
+            "co" -> bars(1)
+            "bn" -> bars(2)
+            "rgt" -> bars(3)
+            "bde" -> exes(1)
+            "div" -> exes(2)
+            "corps" -> exes(3)
+            "army" -> exes(4)
+        }
+        linePaint.pathEffect = pe
+    }
+
+    private fun buildPolyline(n: Int, closed: Boolean) {
+        path.reset()
+        path.moveTo(xs[0], ys[0])
+        for (i in 1 until n) path.lineTo(xs[i], ys[i])
+        if (closed) path.close()
+    }
+
+    /**
+     * Doctrine-style axis-of-advance: an outlined broad arrow along the centerline,
+     * open at the rear. Shaft edges are the centerline offset by ± half width with
+     * miter directions at interior vertices; the head is twice the shaft width.
+     */
+    private fun buildAxisPath(n: Int) {
+        var total = 0f
+        for (i in 0 until n - 1) total += hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i])
+        val w = (total * 0.13f).coerceIn(14f * density, 64f * density)
+        val half = w / 2f
+        val headLen = min(w * 1.25f, total * 0.45f)
+
+        // Tip is the last vertex; neck sits headLen back along the centerline.
+        var remaining = headLen
+        var neckSeg = n - 2
+        var neckX = xs[n - 2]
+        var neckY = ys[n - 2]
+        for (i in n - 2 downTo 0) {
+            val segLen = hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i])
+            if (segLen >= remaining || i == 0) {
+                val t = if (segLen == 0f) 0f else (1f - remaining / segLen).coerceIn(0f, 1f)
+                neckX = xs[i] + (xs[i + 1] - xs[i]) * t
+                neckY = ys[i] + (ys[i + 1] - ys[i]) * t
+                neckSeg = i
+                break
+            }
+            remaining -= segLen
+        }
+
+        // Shaft vertices: rear .. neck
+        val sx = FloatArray(neckSeg + 2)
+        val sy = FloatArray(neckSeg + 2)
+        for (i in 0..neckSeg) {
+            sx[i] = xs[i]; sy[i] = ys[i]
+        }
+        sx[neckSeg + 1] = neckX
+        sy[neckSeg + 1] = neckY
+        val m = neckSeg + 2
+
+        val lx = FloatArray(m)
+        val ly = FloatArray(m)
+        val rx = FloatArray(m)
+        val ry = FloatArray(m)
+        for (i in 0 until m) {
+            val (nxv, nyv) = miterNormal(sx, sy, m, i)
+            lx[i] = sx[i] + nxv * half
+            ly[i] = sy[i] + nyv * half
+            rx[i] = sx[i] - nxv * half
+            ry[i] = sy[i] - nyv * half
+        }
+
+        val ang = atan2((ys[n - 1] - neckY).toDouble(), (xs[n - 1] - neckX).toDouble())
+        val nx = -sin(ang).toFloat()
+        val ny = cos(ang).toFloat()
+
+        path.reset()
+        path.moveTo(lx[0], ly[0])
+        for (i in 1 until m) path.lineTo(lx[i], ly[i])
+        path.lineTo(neckX + nx * w, neckY + ny * w)          // head left barb
+        path.lineTo(xs[n - 1], ys[n - 1])                    // tip
+        path.lineTo(neckX - nx * w, neckY - ny * w)          // head right barb
+        for (i in m - 1 downTo 0) path.lineTo(rx[i], ry[i])  // back along right edge; rear stays open
+    }
+
+    /** Unit normal at vertex [i] of the polyline, averaging adjacent segment normals. */
+    private fun miterNormal(px: FloatArray, py: FloatArray, m: Int, i: Int): Pair<Float, Float> {
+        var dx = 0f
+        var dy = 0f
+        if (i > 0) {
+            dx += px[i] - px[i - 1]
+            dy += py[i] - py[i - 1]
+        }
+        if (i < m - 1) {
+            dx += px[i + 1] - px[i]
+            dy += py[i + 1] - py[i]
+        }
+        val len = hypot(dx, dy)
+        if (len == 0f) return 0f to 0f
+        return (-dy / len) to (dx / len)
+    }
+
+    /** Filled arrowhead at (tx, ty) pointing along [angleRad]. */
+    private fun solidHeadAt(canvas: Canvas, tx: Float, ty: Float, angleRad: Double, color: Int) {
+        val len = 10f * density
+        val spread = Math.toRadians(150.0)
+        path.reset()
+        path.moveTo(tx, ty)
+        path.lineTo(
+            tx + len * cos(angleRad + spread).toFloat(),
+            ty + len * sin(angleRad + spread).toFloat(),
+        )
+        path.lineTo(
+            tx + len * cos(angleRad - spread).toFloat(),
+            ty + len * sin(angleRad - spread).toFloat(),
+        )
+        path.close()
+        fillPaint.color = color
+        fillPaint.alpha = 235
+        canvas.drawPath(path, fillPaint)
+    }
+
+    private fun drawSolidArrowHead(canvas: Canvas, n: Int, color: Int) {
+        val ang = atan2((ys[n - 1] - ys[n - 2]).toDouble(), (xs[n - 1] - xs[n - 2]).toDouble())
+        val len = 11f * density
+        val spread = Math.toRadians(150.0)
+        path.reset()
+        path.moveTo(xs[n - 1], ys[n - 1])
+        path.lineTo(
+            xs[n - 1] + len * cos(ang + spread).toFloat(),
+            ys[n - 1] + len * sin(ang + spread).toFloat(),
+        )
+        path.lineTo(
+            xs[n - 1] + len * cos(ang - spread).toFloat(),
+            ys[n - 1] + len * sin(ang - spread).toFloat(),
+        )
+        path.close()
+        fillPaint.color = color
+        fillPaint.alpha = 235
+        canvas.drawPath(path, fillPaint)
+    }
+
+    private fun label(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        y: Float,
+        color: Int,
+        haloColor: Int,
+        above: Boolean,
+        centered: Boolean = false,
+    ) {
+        if (text.isBlank()) return
+        val size = 11.5f * density
+        textFill.textSize = size
+        textHalo.textSize = size
+        textFill.color = color
+        textFill.alpha = 245
+        textHalo.color = haloColor
+        textHalo.alpha = 200
+        val tw = textFill.measureText(text)
+        val tx = if (centered) x - tw / 2f else x + 6f * density
+        val ty = if (above) y - 7f * density else y + size / 3f
+        canvas.drawText(text, tx, ty, textHalo)
+        canvas.drawText(text, tx, ty, textFill)
+    }
+
+    private fun formatRange(m: Double): String =
+        if (m < 995) String.format(Locale.US, "%.0f m", m)
+        else String.format(Locale.US, "%.2f km", m / 1000.0)
+
+    private fun segmentDistance(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val dx = bx - ax
+        val dy = by - ay
+        val len2 = dx * dx + dy * dy
+        val t = if (len2 == 0f) 0f else ((px - ax) * dx + (py - ay) * dy) / len2
+        val tc = max(0f, min(1f, t))
+        return hypot(px - (ax + tc * dx), py - (ay + tc * dy))
+    }
+
+    companion object {
+        const val MAX_PTS = 64
+    }
+}

@@ -1,81 +1,83 @@
-# Meridian
+> **Staging repo for the iOS port.** This tree is a copy of [`Artemis2028/gridfix`](https://github.com/Artemis2028/gridfix) (Android tip) into `Test-repo3`. Keep `gridfix` as the Android product/testing line; evolve shared/portable code and the iOS app here.
 
-Offline-first MGRS land-navigation for Android. Independent reimplementation —
-map, compass, pace count, and a grid that agrees with the sheet in your hand.
+# MGRS GPS
 
-**Product:** Meridian  
-**Package:** `com.artemis.mgrsnav`  
-**License:** MIT
+An offline-first MGRS land-navigation app for Android. Built for people who are
+taught to navigate with a map, a compass and a pace count, and who want the grid
+in their pocket to agree with the one on the sheet.
 
-No accounts. No telemetry. No cloud sync. Everything stays on the device.
+**Status: 0.9.31 release candidate** — earlier builds are in closed testing on Google Play. 1.0 is the store launch.
 
-## Features (v1)
+Package `app.gridfix.android` · repository `gridfix` (the original working name;
+the product is **MGRS GPS** everywhere a user can see it).
 
-1. **Position** — MGRS 4–10 digits; Glance readout or compass Dial; fix quality
-   in plain words (EXCELLENT → DEGRADED, plus STALE / NETWORK); precision capped
-   by fix accuracy.
-2. **Navigate** — azimuth, back azimuth, distance, ETA; haptic guide with stubs
-   when no vibrator; arrival feedback.
-3. **Map** — osmdroid map with MGRS grid overlay concept, waypoint markers,
-   offline tile cache, and a simple ruler.
-4. **Waypoints** — Room/SQLite storage, folders, GPX import/export.
-5. **Field tools** — pace count, declination diagram (toy model), sun/moon times;
-   resection/intersection as a stretch demo.
+## What it does
 
-## Architecture
+- **Position** — your grid at 4 to 10 digits, in one of three faces: a plain
+  Glance readout, an issued-pattern lensatic dial, or a clean compass card.
+  Fix quality is graded in plain words (EXCELLENT to DEGRADED, plus STALE and
+  NETWORK) with the finest MGRS precision that fix actually supports.
+- **Navigate** — azimuth, back azimuth, distance and time to a waypoint, with an
+  eyes-free haptic guide and an arrival buzz.
+- **Map** — MGRS grid overlay down to 10 m, offline basemaps (browse cache, USGS
+  area download, or your own MBTiles), NATO symbols, tactical control measures,
+  ruler, elevation, line of sight, viewshed and contour lines.
+- **Waypoints** — folders that toggle on and off as one overlay, tracks, routes,
+  route cards, practice courses, GPX / KML / ATAK import and export, backups.
+  MilGPS GPX imports retain marker color, shape/character, elevation and recording
+  time through storage, backup and GPX export. Marker colors do not set affiliation.
+- **Field tools** — resection and intersection, sun and moon times, declination
+  diagram, pace count, strip-map PDFs.
 
-```
-com.artemis.mgrsnav
-├── domain/          Pure JVM field math (MGRS, geo, sun/moon, pace, declination)
-├── data/            Room DB, GPX codec, repositories
-├── ui/              Jetpack Compose screens (Position, Navigate, Map, Waypoints, Tools)
-└── MeridianApp      Manual DI wiring
-```
-
-MGRS conversion uses [mil.nga:mgrs](https://github.com/ngageoint/mgrs-java) (MIT).
-
-## Requirements
-
-- **JDK 17+** (project targets Java 17 bytecode; JDK 21 works)
-- **Android SDK** with `compileSdk 35`, platform tools, and a device/emulator for APK installs
-- Android Gradle Plugin 8.7.x / Gradle 8.9+
-
-Set `ANDROID_HOME` (or create `local.properties` with `sdk.dir=...`).
-
-## Build
-
-```bash
-./gradlew assembleDebug
-./gradlew testDebugUnitTest   # or: ./gradlew test
-```
-
-Unit tests cover MGRS round-trips, zone samples, angle wrap, haptic cues,
-GPX import/export, pace math, twilight ordering, and declination conversion.
-
-If the Android SDK is not installed, Gradle will still sync the JVM domain
-sources; install command-line tools first:
-
-```bash
-# Example (Linux)
-mkdir -p "$HOME/Android/Sdk/cmdline-tools"
-# download commandlinetools-linux-*.zip from Google, unzip into cmdline-tools/latest
-sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
-echo "sdk.dir=$HOME/Android/Sdk" > local.properties
-```
+Everything works with no signal and no account. Nothing is uploaded anywhere.
 
 ## Not a primary means of navigation
 
 A phone GPS is an aid. Carry a map and a compass, know your pace count, and
-confirm every grid against the ground.
+confirm every grid against the ground. Coverage and accuracy of the open map and
+elevation data vary by country, and contours are modelled rather than surveyed.
+
+## Building
+
+```
+./gradlew assembleDebug
+```
+
+JDK 17. The Android SDK comes from `ANDROID_HOME` or `local.properties`.
+
+Map tiles fall back to community sources when no key is present. To build with
+MapTiler basemaps, set `MAPTILER_KEY` in the environment before building; the
+key is compiled into `BuildConfig` and should be restricted by package name and
+signing certificate in the MapTiler dashboard, since anything in an APK is public.
+
+Release builds are minified by R8 and need signing config in the environment
+(`GRIDFIX_KS`, `GRIDFIX_KS_PASS`). CI publishes `mapping.txt` with every build so
+a Play crash report can be de-obfuscated.
+
+Unit tests cover the field math — MGRS round trips, zone exceptions, ray fixes,
+angle wrap, folder naming, twilight ordering:
+
+```
+./gradlew testDebugUnitTest
+```
+
+## How releases are made
+
+CI builds every push to `main` and publishes the debug APK to the `latest`
+release, plus a signed AAB and a minified release APK when the keystore secrets
+are present. Build status is mirrored to the `ci-status` branch.
+
+Source changes are delivered through a bootstrap payload in the workflow file,
+which is applied exactly once per version and then skipped (`.github/last-payload`
+records which payload has landed). Edit the Kotlin in git, not in the workflow.
 
 ## Third-party
 
-| Component | License |
-|-----------|---------|
-| mil.nga MGRS / Grid | MIT |
-| osmdroid | Apache 2.0 |
-| Jetpack / Room / Compose | Apache 2.0 |
-| OpenStreetMap tiles | ODbL © OSM contributors |
+MGRS conversion by the NGA MGRS library (MIT). Map engine osmdroid (Apache 2.0).
+QR codes by ZXing (Apache 2.0). Map data © OpenStreetMap contributors (ODbL),
+OpenTopoMap (CC-BY-SA), USGS, MapTiler. Elevation from Terrarium tiles via AWS
+Open Data (SRTM, USGS 3DEP/NED, GMTED2010, ETOPO1). Fonts: Saira Semi Condensed,
+Fira Mono and Antonio (SIL Open Font License).
 
 ## License
 

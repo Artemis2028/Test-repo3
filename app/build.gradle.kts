@@ -2,101 +2,108 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.devtools.ksp")
 }
 
 android {
-    namespace = "com.artemis.mgrsnav"
-    compileSdk = 35
+    namespace = "app.gridfix.android"
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.artemis.mgrsnav"
+        applicationId = "app.gridfix.android"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables.useSupportLibrary = true
+        targetSdk = 36
+        versionCode = 60
+        versionName = "0.9.32"
+        // MapTiler API key from the CI secret; empty in builds without it (community-tile fallback)
+        buildConfigField("String", "MAPTILER_KEY", "\"" + (System.getenv("MAPTILER_KEY") ?: "") + "\"")
+    }
+
+    // Play upload key: CI decodes the keystore secret to a file and exports
+    // GRIDFIX_KS + GRIDFIX_KS_PASS. Without them, release stays unsigned and
+    // only the debug APK is built.
+    val ksPath = System.getenv("GRIDFIX_KS")
+    val ksPass = System.getenv("GRIDFIX_KS_PASS")
+    signingConfigs {
+        if (ksPath != null && ksPass != null) {
+            create("release") {
+                storeFile = file(ksPath)
+                storePassword = ksPass
+                keyAlias = "gridfix"
+                keyPassword = ksPass
+            }
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // R8: shrink + obfuscate. The CI keeps mapping.txt with every build so a
+            // Play crash report can be de-obfuscated, and also builds a signed release
+            // APK so this exact output can be installed and smoke-tested before upload.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
-        debug {
-            applicationIdSuffix = ".debug"
-            versionNameSuffix = "-debug"
-        }
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
     kotlinOptions {
         jvmTarget = "17"
     }
+
     buildFeatures {
         compose = true
         buildConfig = true
     }
-    packaging {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-    }
-    testOptions {
-        unitTests.isIncludeAndroidResources = false
-    }
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
+    val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(composeBom)
-    androidTestImplementation(composeBom)
-
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.navigation:navigation-compose:2.8.5")
-
     implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    // 2.8.3+ only. With Compose 1.6 (this BOM), lifecycle 2.8's LocalLifecycleOwner
+    // finds Compose UI's copy by REFLECTION, and 2.8.2 shipped no keep rule for
+    // it: the debug build ran, the R8 build died on first composition with
+    // "CompositionLocal LocalLifecycleOwner not present" (lifecycle b/346808608,
+    // fixed 2.8.3). 2.8.5 is the last 2.8.x before the Compose Runtime 1.7.1
+    // dependency; do not go past it without moving the BOM to Compose 1.7.
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
 
-    // MGRS (NGA)
+    // NGA (National Geospatial-Intelligence Agency) MGRS library, MIT licensed
     implementation("mil.nga:mgrs:2.1.3")
-    implementation("mil.nga:grid:1.1.2")
 
-    // Room
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
+    // Map engine: osmdroid (Apache 2.0) — offline-first raster maps, MBTiles, tile cache
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
 
-    // Location
-    implementation("com.google.android.gms:play-services-location:21.3.0")
+    // QR generation for position hand-off (Apache 2.0)
+    implementation("com.google.zxing:core:3.5.3")
 
-    // Map (osmdroid) — offline-friendly OSM tiles + custom overlays
-    implementation("org.osmdroid:osmdroid-android:6.1.18")
+    // Google Play Billing for the GridFix Pro subscription
+    implementation("com.android.billingclient:billing-ktx:9.1.0")
 
-    // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+    // Transitive androidx.fragment 1.1.0 is flagged outdated by Play; pin a current one
+    implementation("androidx.fragment:fragment:1.8.5")
 
-    // Unit tests (pure JVM domain math)
+    // Field math (MGRS, UTM, zone exceptions, ray fixes, sun/moon) is plain JVM code
+    // and is the part that must never silently drift. See app/src/test.
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("com.google.truth:truth:1.4.4")
-
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    // org.json ships in android.jar as a stub that returns defaults under
+    // isReturnDefaultValues, so a JVM test cannot parse its own output
+    // without the real artifact on the test classpath ahead of it.
+    testImplementation("org.json:json:20240303")
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
 }

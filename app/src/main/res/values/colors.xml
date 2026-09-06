@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="meridian_green">#1B5E3B</color>
-    <color name="meridian_sand">#C4A35A</color>
-    <color name="ic_launcher_background">#0B1A12</color>
+    <color name="ic_launcher_background">#0B0E13</color>
 </resources>
